@@ -3,9 +3,13 @@ package auth
 import (
 	"crypto"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
+	"io/ioutil"
 	"net/http"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -27,6 +31,20 @@ var (
 )
 
 type KeyLookupFunc func(keyId string) (crypto.PublicKey, error)
+
+func KeyFileLookUp(keyDir string) KeyLookupFunc {
+	return func(keyId string) (crypto.PublicKey, error) {
+		keyFilename := keyId + ".pem"
+		keyPath := path.Join(keyDir, keyFilename)
+		fileBytes, err := ioutil.ReadFile(keyPath)
+		if err != nil {
+			return nil, err
+		}
+		block, _ := pem.Decode([]byte(fileBytes))
+		x509pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+		return x509pubKey.(crypto.PublicKey), err
+	}
+}
 
 func CheckAuthorization(next http.HandlerFunc, keyLookup KeyLookupFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
