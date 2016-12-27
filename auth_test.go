@@ -7,7 +7,7 @@
 // Written by Daniele Stroppa <daniele.stroppa@joyent.com>
 //
 
-package auth
+package httpsignature
 
 import (
 	"net/http"
