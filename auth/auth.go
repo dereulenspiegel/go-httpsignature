@@ -18,32 +18,18 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
 const (
 	// Authorization Headers
-	SdcSignature   = "Signature keyId=\"/%s/keys/%s\",algorithm=\"%s\" %s"
-	MantaSignature = "Signature keyId=\"/%s/keys/%s\",algorithm=\"%s\",signature=\"%s\""
+	HttpSignature = `Signature keyId="%s",algorithm="%s",headers="%s",signature="%s"`
 )
 
-type Endpoint struct {
-	URL string
-}
-
 type Auth struct {
-	User      string
+	KeyId      string
 	PrivateKey PrivateKey
-	Algorithm string
-}
-
-type Credentials struct {
-	UserAuthentication *Auth
-	SdcKeyId           string
-	SdcEndpoint        Endpoint
-	MantaKeyId         string
-	MantaEndpoint      Endpoint
+	Algorithm  string
 }
 
 type PrivateKey struct {
@@ -51,7 +37,7 @@ type PrivateKey struct {
 }
 
 // NewAuth creates a new Auth.
-func NewAuth(user, privateKey, algorithm string) (*Auth, error) {
+func NewAuth(keyId, privateKey, algorithm string) (*Auth, error) {
 	block, _ := pem.Decode([]byte(privateKey))
 	if block == nil {
 		return nil, fmt.Errorf("invalid private key data: %s", privateKey)
@@ -60,42 +46,42 @@ func NewAuth(user, privateKey, algorithm string) (*Auth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("An error occurred while parsing the key: %s", err)
 	}
-	return &Auth{user, PrivateKey{rsakey}, algorithm}, nil
+	return &Auth{keyId, PrivateKey{rsakey}, algorithm}, nil
 }
 
 // The CreateAuthorizationHeader returns the Authorization header for the give request.
-func CreateAuthorizationHeader(headers http.Header, credentials *Credentials, isMantaRequest bool) (string, error) {
-	if isMantaRequest {
-		signature, err := GetSignature(credentials.UserAuthentication, "date: "+headers.Get("Date"))
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf(MantaSignature, credentials.UserAuthentication.User, credentials.MantaKeyId,
-			credentials.UserAuthentication.Algorithm, signature), nil
+func CreateAuthorizationHeader(r *http.Request, headerFields []string, auth *Auth) (string, error) {
+	if len(headerFields) == 0 {
+		headerFields = append(headerFields, "date")
 	}
-	signature, err := GetSignature(credentials.UserAuthentication, headers.Get("Date"))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(SdcSignature, credentials.UserAuthentication.User, credentials.SdcKeyId,
-		credentials.UserAuthentication.Algorithm, signature), nil
-}
-
-// The GetSignature method signs the specified key according to http://apidocs.joyent.com/cloudapi/#issuing-requests
-// and http://apidocs.joyent.com/manta/api.html#authentication.
-func GetSignature(auth *Auth, signing string) (string, error) {
 	hashFunc := getHashFunction(auth.Algorithm)
-	hash := hashFunc.New()
-	hash.Write([]byte(signing))
 
-	digest := hash.Sum(nil)
+	digest, err := generateDigest(r, hashFunc, headerFields)
+	if err != nil {
+		return "", nil
+	}
 
 	signed, err := rsa.SignPKCS1v15(rand.Reader, auth.PrivateKey.key, hashFunc, digest)
-	if err != nil {
-		return "", fmt.Errorf("An error occurred while signing the key: %s", err)
-	}
 
-	return base64.StdEncoding.EncodeToString(signed), nil
+	signature := base64.StdEncoding.EncodeToString(signed)
+	headerList := strings.Join(headerFields, " ")
+	return fmt.Sprintf(HttpSignature, auth.KeyId, auth.Algorithm, headerList, signature), nil
+}
+
+func generateDigest(r *http.Request, hashFunc crypto.Hash, headerFields []string) ([]byte, error) {
+	hash := hashFunc.New()
+	for i, headerField := range headerFields {
+		if headerField == "request-line" {
+			// rebuild the original request-line
+			hash.Write([]byte(r.Method + " " + r.RequestURI + " " + r.Proto))
+		} else {
+			hash.Write([]byte(headerField + ": " + r.Header.Get(headerField)))
+		}
+		if i < len(headerFields)-1 {
+			hash.Write([]byte("\n"))
+		}
+	}
+	return hash.Sum(nil), nil
 }
 
 // Helper method to get the Hash function based on the algorithm
@@ -111,22 +97,4 @@ func getHashFunction(algorithm string) (hashFunc crypto.Hash) {
 		hashFunc = crypto.SHA256
 	}
 	return
-}
-
-func (cred *Credentials) Region() string {
-	parsedUrl, err := url.Parse(cred.SdcEndpoint.URL)
-	if err != nil {
-		// Bogus URL - no region.
-		return ""
-	}
-	if strings.HasPrefix(parsedUrl.Host, "localhost") || strings.HasPrefix(parsedUrl.Host, "127.0.0.1") {
-		return "some-region"
-	}
-
-	host := parsedUrl.Host
-	firstDotIdx := strings.Index(host, ".")
-	if firstDotIdx >= 0 {
-		return host[:firstDotIdx]
-	}
-	return host
 }
